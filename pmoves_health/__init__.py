@@ -95,13 +95,20 @@ class NATSCheck(DependencyCheck):
         self.nats_url = nats_url
 
     async def check(self) -> bool:
+        nc = None
         try:
             from nats.aio.client import Client as NATS
-            nc = await NATS.connect(self.nats_url, connect_timeout=2)
-            await nc.close()
+            nc = NATS()
+            await nc.connect(self.nats_url, connect_timeout=2)
             return True
         except Exception:
             return False
+        finally:
+            if nc:
+                try:
+                    await nc.close()
+                except Exception:
+                    pass
 
 
 class HealthChecker:
@@ -187,13 +194,14 @@ _health_checker = HealthChecker()
 
 def health_check(checks: List[DependencyCheck] = None):
     """Decorator to add health checks to a function."""
+    # Add checks to global checker once (not on every call)
+    if checks:
+        for check in checks:
+            _health_checker.add_check(check)
+
     def decorator(func: Callable):
         @wraps(func)
         async def wrapper(*args, **kwargs):
-            checker = _health_checker
-            if checks:
-                for check in checks:
-                    checker.add_check(check)
             return await func(*args, **kwargs)
         return wrapper
     return decorator
@@ -225,14 +233,19 @@ async def get_health_status() -> Dict[str, Any]:
 
 
 if FASTAPI_AVAILABLE:
-    from fastapi import APIRouter
+    from fastapi import APIRouter, Response
+    from fastapi.responses import JSONResponse
 
     health_check_router = APIRouter()
 
     @health_check_router.get(HEALTH_CHECK_PATH)
-    async def healthz():
+    async def healthz(response: Response):
         """Standard health check endpoint."""
-        return await get_health_status()
+        status_data = await get_health_status()
+        # Return appropriate HTTP status code
+        if status_data.get("status") == HealthStatus.UNHEALTHY:
+            return JSONResponse(status_data, status_code=503)
+        return status_data
 
     def create_health_app(service_name: str = None) -> "FastAPI":
         """Create a minimal FastAPI app with health check."""
